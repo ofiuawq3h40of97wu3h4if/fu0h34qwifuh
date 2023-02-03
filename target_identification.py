@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader
 import models
 
 import utils
-from transformers import BertConfig
+from models import CandidateTargetClassifier
 from tensorflow.keras.preprocessing.sequence import pad_sequences
 
 import numpy as np
@@ -42,9 +42,7 @@ import nltk
 from nltk.stem import SnowballStemmer
 import inflect
 import target_utils
-
-from models import TargetIdentifier
-
+from torch.utils.data import WeightedRandomSampler
 
 
 def main(args):
@@ -56,25 +54,29 @@ def main(args):
     print("Loading dataset...")
     _train_target, _test_targets = target_utils.load_target_dataset(filter=1)
     
-    _train_dataset = target_utils.get_cached_target_dataset(_train_target, "train", lu_manager, max_size=100)
-    _test_dataset = target_utils.get_cached_target_dataset(_test_targets, "test", lu_manager, max_size=100)
+    _train_dataset = target_utils.get_cached_target_dataset(_train_target, "train", lu_manager)
+    _test_dataset = target_utils.get_cached_target_dataset(_test_targets, "test", lu_manager)
 
     train_dataset = target_utils.TargetSpanDataset(_train_dataset)
     test_dataset = target_utils.TargetSpanDataset(_test_dataset)
 
     # Since batch_size = 1, need grad_accumulation=4 or maybe 8
+    import IPython
+    IPython.embed()
     train_dataloader = DataLoader(train_dataset, batch_size=1, shuffle=True)
     test_dataloader = DataLoader(test_dataset, batch_size=1)
-    
+
     # Load model
     print("Loading model...")
-    model = TargetIdentifier.from_pretrained("bert-base-uncased").to(globalvars.device)
+    model = CandidateTargetClassifier.from_pretrained("bert-base-uncased").to(globalvars.device)
     
     # Train model
     if args.train:
         print("Beginning model training...")
         optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5)
-        lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer=optimizer, step_size=3, gamma=0.75)
+        lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer=optimizer, step_size=2, gamma=0.75)
+        
+        model.train()
         
         best_acc = 0
         steps = 0
@@ -84,9 +86,9 @@ def main(args):
             
             for batch in train_dataloader:
                 toks = batch["tokens"].to(globalvars.device)
-                labels = batch["label"].to(globalvars.device)
+                candidates = batch["label"].to(globalvars.device)
                 
-                outputs = model(toks, labels=labels)
+                outputs = model(toks, labels=candidates)
                 outputs.loss.backward()
                 
                 if steps % args.grad_accumulation == 0: 
@@ -97,6 +99,8 @@ def main(args):
                     print(f"{epoch} | {steps}: {outputs.loss}")
                 
                 steps += 1
+
+            lr_scheduler.step()
             
             acc = target_utils.evaluate_targets(model, test_dataloader)
             
@@ -104,6 +108,9 @@ def main(args):
                 best_acc = acc
                 print(f"New best acc: {best_acc}")
                 torch.save(model, f"{args.model_path}targ-id-{args.model_name if args.model_name != None else 'best'}")
+
+        print(f"Training complete. Best accuracy: {best_acc}")
+    
                 
 if __name__ == "__main__":
 
@@ -112,8 +119,7 @@ if __name__ == "__main__":
     parser.add_argument("--evaluate", help="evaluate the model", default=True)
     parser.add_argument("--semafor", help="train and evaluate on the same dataset as semafor and open-sesame", default=True)
     parser.add_argument("--epochs", help="number of epochs to train the model on", default=25, type=int)
-    parser.add_argument("--grad_accumulation", help="number of batches to accumulate the gradient on", default=4, type=int)
-    parser.add_argument("--batch_size", help="number of samples in each batch", default=8, type=int)
+    parser.add_argument("--grad_accumulation", help="number of batches to accumulate the gradient on", default=8, type=int)
     parser.add_argument("--eval_path", help="directory to save evals in", default="./evals/", type=str)
     parser.add_argument("--model_path", help="dir to save model in", default="./models/")
     parser.add_argument("--eval_after_each_epoch", help="flag for evaluating after each epoch", default=False, action="store_true")

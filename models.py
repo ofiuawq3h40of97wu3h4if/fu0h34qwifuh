@@ -479,7 +479,7 @@ class FrameElementIdentifierWithPOS(BertPreTrainedModel):
         )
 
 # Target Identifier
-class TargetIdentifier(BertPreTrainedModel):
+class CandidateTargetClassifier(BertPreTrainedModel):
     _keys_to_ignore_on_load_unexpected = [r"pooler"]
 
     def __init__(self, config):
@@ -493,71 +493,8 @@ class TargetIdentifier(BertPreTrainedModel):
         self.classifier = torch.nn.Linear(config.hidden_size, 2) # 0 or 1
         
         self.loss_fct = CrossEntropyLoss()
-
-        self.init_weights()
-
-    def forward(self, input_ids, attention_mask=None, token_type_ids=None, position_ids=None, head_mask=None, 
-                inputs_embeds=None, labels=None, output_attentions=None, output_hidden_states=None, return_dict=None):
-        """Predict whether target spans are valid
-
-        Args:
-            input_ids (Tensor(b, n), optional): 
-            labels (Tensor(b, n, t), optional): Defaults to None.
-
-        """
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
-        outputs = self.bert(
-            input_ids,
-            attention_mask=attention_mask,
-            token_type_ids=token_type_ids,
-            position_ids=position_ids,
-            head_mask=head_mask,
-            inputs_embeds=inputs_embeds,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-        )
-        sequence_output = outputs.last_hidden_state
-        logits = []
-
-        target_span = labels != -100
-        # for each sample in batch 
-        for i in range(input_ids.shape[0]):
-            # For each span, represented by subsequent 0/1s in a row in label,
-            # merge tokens and predict
-            for n in range(labels[i].shape[0]):
-                cur_span = target_span[i][n]
-                logits.append(self.classifier(sequence_output[i,cur_span,:].mean(dim=0)))
-
-        logits = torch.vstack(logits).transpose(0,1).unsqueeze(0).to(globalvars.device)
-        loss = None
-
-        if labels != None and len(sequence_output) > 0:
-            target_labels = torch.tensor([x.unique()[-1] for x in labels[0]]).unsqueeze(0).to(globalvars.device)
-            loss = self.loss_fct(logits, target_labels)
-
-        return TokenClassifierOutput(
-            loss=loss,
-            logits=logits,
-            hidden_states=outputs.hidden_states,
-            attentions=outputs.attentions,
-        )
-
-class TargetIdentifier2(BertPreTrainedModel):
-    _keys_to_ignore_on_load_unexpected = [r"pooler"]
-
-    def __init__(self, config):
-
-        super().__init__(config)
-
-        self.bert = BertModel(config)
-        self.dropout = torch.nn.Dropout(config.hidden_dropout_prob)
-        self.relu = torch.nn.ReLU()
-
-        self.classifier = torch.nn.Linear(config.hidden_size, 2) # 0 or 1
         
-        self.loss_fct = CrossEntropyLoss()
+        self._device = globalvars.device
 
         self.init_weights()
 
@@ -566,10 +503,12 @@ class TargetIdentifier2(BertPreTrainedModel):
         """Predict whether target spans are valid
 
         Args:
-            input_ids (Tensor(b, n), optional): 
-            labels (Tensor(b, n, t), optional): Defaults to None.
-
+            input_ids (Tensor(b, n), optional): _description_.
+            labels (Tensor(b, t, n), optional): Batch containing b samples of t n-length candidate targets
         """
+
+        assert input_ids.shape[0] == 1, "unsupported for batch size > 1"
+
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         outputs = self.bert(
@@ -583,23 +522,25 @@ class TargetIdentifier2(BertPreTrainedModel):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
-        sequence_output = outputs.last_hidden_state
+        sequence_output = outputs.last_hidden_state # (b, n, H)
         logits = []
 
-        target_span = labels != -100
+        target_span = labels != -100 # (b, t, n) ~ one-hot spans of candidate target tokens
+
         # for each sample in batch 
         for i in range(input_ids.shape[0]):
             # For each span, represented by subsequent 0/1s in a row in label,
             # merge tokens and predict
             for n in range(labels[i].shape[0]):
                 cur_span = target_span[i][n]
-                logits.append(self.classifier(sequence_output[i,cur_span,:].mean(dim=0)))
+                logits.append(self.classifier(sequence_output[i,cur_span,:].mean(dim=0))) # (2,)
 
-        logits = torch.vstack(logits).transpose(0,1).unsqueeze(0).to(globalvars.device)
+        logits = torch.vstack(logits).transpose(0,1).unsqueeze(0).to(self.device) # (b*t, 2)
         loss = None
 
-        if labels != None and len(sequence_output) > 0:
-            target_labels = torch.tensor([x.unique()[-1] for x in labels[0]]).unsqueeze(0).to(globalvars.device)
+        if labels != None and len(sequence_output) > 0 and self.training:
+            # target_labels = torch.tensor([x.unique()[-1] for x in labels[0]]).unsqueeze(0).to(self.device)
+            target_labels = labels.max(dim=-1).values.to(self.device)
             loss = self.loss_fct(logits, target_labels)
 
         return TokenClassifierOutput(
@@ -608,7 +549,6 @@ class TargetIdentifier2(BertPreTrainedModel):
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
-
 
 
 # FE classifier using candidate spans

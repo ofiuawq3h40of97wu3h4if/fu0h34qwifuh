@@ -206,7 +206,7 @@ class LexicalUnitManager:
                 prev_child.add_frame(frame)
                     
     def load_lus(self):
-        root = ET.parse("./data/fndata-1.7/luIndex.xml").getroot()
+        root = ET.parse(f"{config.framenet_path}/luIndex.xml").getroot()
         lu_elements = root.findall(".//{http://framenet.icsi.berkeley.edu}lu")
         ext = set([])
 
@@ -475,8 +475,8 @@ class LexicalUnitManager:
         
         candidates[:] = [x for x in candidates if x["end"] >= 0] 
 
-        return _remove_dupes(candidates) 
-
+        return _remove_dupes(candidates)
+    
 class TargetSpanDataset(Dataset):
     def __init__(self, target_spans:List[Dict]):
         self.target_spans = [{k:torch.tensor(v) if k != "sentence" else v for k,v in x.items()} for x in target_spans]
@@ -712,15 +712,21 @@ def evaluate_targets(model, test_dataloader):
 
     for batch in test_dataloader:
         toks = batch["tokens"].to(globalvars.device)
-        labels = batch["label"].to(globalvars.device)
+        candidates = batch["label"].to(globalvars.device)
         
-        outputs = model(toks, labels=labels)
+        outputs = model(toks, labels=candidates)
         
         pred_valid_spans = outputs.logits.detach().argmax(dim=1)
-        pred_targets = labels[pred_valid_spans == 1].max(dim=0).values
         
-        preds.append(pred_targets)
-        ground_truth.append(labels.max(dim=0).values.squeeze())
+        if pred_valid_spans.max() == 0:
+            preds.append(torch.zeros_like(toks).squeeze()[1:-1])
+        else:
+            pred_token_labels = (candidates != -100)[pred_valid_spans == 1].max(dim=0).values.long()
+            preds.append(pred_token_labels[1:-1])
+        
+        gt_token_labels = candidates.max(dim=1).values.squeeze()
+        gt_token_labels[gt_token_labels < 0] = 0
+        ground_truth.append(gt_token_labels[1:-1])
 
     preds = torch.cat(preds).cpu().numpy()
     ground_truth = torch.cat(ground_truth).cpu().numpy()
